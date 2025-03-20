@@ -1,0 +1,5 @@
+.venv/
+log/
+processed_data/
+raw_data/
+yaml/
