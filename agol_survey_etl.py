@@ -2,6 +2,7 @@ import polars, os, logging, requests, json
 from kwb_loader import loader
 from datetime import datetime
 from yaml import load, Loader
+from log.logfilter import SensitiveFormatter
 
 logging.basicConfig(
     filename="log/agol_etl.log",
@@ -13,7 +14,14 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
+
+for handler in logging.root.handlers:
+    handler.setFormatter(
+        SensitiveFormatter(
+            "%(asctime)s - %(levelname)3s - %(message)s", "%Y-%m-%d %H:%M:%S"
+        )
+    )
 
 user = os.getenv("kwb_dw_user")
 host = os.getenv("kwb_dw_host")
@@ -39,7 +47,7 @@ def query_agol_data(token: str, survey_params: dict, date_ran: str):
     try:
         layer_r = requests.get(layer_url, layer_params)
         if layer_r.status_code == 200:
-            logger.info("Successfully %s queried data!" % (survey_params["name"]))
+            logger.info("Successfully queried %s data!" % (survey_params["name"]))
         else:
             logging.exception(
                 "Bad request - check %s url and debug" % (survey_params["name"])
