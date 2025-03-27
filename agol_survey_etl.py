@@ -1,5 +1,6 @@
 import polars, os, logging, requests, json
-from kwb_loader import loader
+import psycopg2 as pg
+from psycopg2 import sql
 from datetime import datetime
 from yaml import load, Loader
 from log.logfilter import SensitiveFormatter
@@ -60,7 +61,7 @@ def query_agol_data(token: str, survey_params: dict, date_ran: str):
         json.dump(layer_json, file, indent=4)
 
 
-def transform_agol_data(survey_params, date_ran) -> str:
+def transform_agol_data(survey_params, date_ran) -> polars.DataFrame:
     """
     This transforms json data into parquets with correct data format.
 
@@ -87,7 +88,7 @@ def transform_agol_data(survey_params, date_ran) -> str:
         date_ran,
     )
     df.write_parquet(proccessed_data_path)
-    return proccessed_data_path
+    return df
 
 
 def build_schema(survey_params: dict) -> dict:
@@ -98,7 +99,7 @@ def build_schema(survey_params: dict) -> dict:
     Returns:
         schema: dict, dictionary of colums with correct polars typing
     """
-    schema: dict = survey_params["schema"]
+    schema: dict = survey_params["json_schema"]
     for key, value in schema.items():
         if value == "string":
             schema[key] = polars.String
@@ -111,33 +112,77 @@ def build_schema(survey_params: dict) -> dict:
     return schema
 
 
-def load_agol_data(user, host, password, etl_yaml, survey_params, proccessed_data_path):
-    """
-    Loads agol survey data into db
-
-    Args:
-        user: str, username cred for db
-        host: str, host on which db is hosted
-        password: str, password cred for db
-        etl_yaml: dict, dictionary of parameters used for etl
-        survey_params: dict, dictionary of parameters used for specific survey query
-        date_ran: str, date on which etl was ran
-    """
+def get_pg_connection(db_name: str):
     try:
-        loader.load(
-            credentials=(user, host, password),
-            dbname=etl_yaml["db_name"],
-            schema=etl_yaml["schema"],
-            table_name=survey_params["table_name"],
-            data_path=proccessed_data_path,
-            prim_key=survey_params["prim_key"],
+        con = pg.connect(
+            "dbname=%s user=%s host=%s password=%s" % (db_name, user, host, password)
         )
+        con.autocommit = True
+        logging.info("Successfully connected to %s db" % (db_name))
+        return con
+
+    except pg.OperationalError as Error:
+        logging.error(Error)
+
+
+def check_table_exists(con, schema: str, table: str):
+    cur = con.cursor()
+    command = sql.SQL(
+        """
+        Select * from {schema}.{table} limit 1  
+        """
+    ).format(
+        schema=sql.Identifier(schema),
+        table=sql.Identifier(table),
+    )
+    try:
+        cur.execute(command)
+        if isinstance(cur.fetchall(), list):
+            logging.info("Table exists, continue with loading.")
+    except pg.OperationalError as Error:
+        logging.error(Error)
+
+
+def load_data_into_pg_warehouse(
+    data: polars.DataFrame, etl_yaml: dict, survey_params: dict
+):
+    con = get_pg_connection(etl_yaml["db_name"])
+    check_table_exists(con, etl_yaml["schema_name"], survey_params["table_name"])
+    try:
+        cur = con.cursor()
+        for row in data.to_numpy():
+            query = build_load_query(row, etl_yaml, survey_params)
+            cur.execute(query)
+        cur.close()
+        con.close()
         logging.info(
-            "Successfully loaded data into %s.%s.%s \n"
-            % (etl_yaml["db_name"], etl_yaml["schema"], survey_params["table_name"])
+            "Data was successfully loaded to %s.%s"
+            % (etl_yaml["db_name"], survey_params["table_name"])
         )
-    except:
-        logger.exception("")
+    except pg.OperationalError as Error:
+        con.close()
+        logging.error(Error)
+    return
+
+
+def build_load_query(data, etl_yaml: dict, survey_params: dict):
+    col_names = sql.SQL(", ").join(
+        sql.Identifier(col) for col in survey_params["db_schema"].keys()
+    )
+    values = sql.SQL(" , ").join(sql.Literal(val) for val in data)
+    return sql.SQL(
+        """
+        INSERT INTO {schema_name}.{table} ({col_names}) VALUES ({values})
+        ON CONFLICT ({prim_key}) DO UPDATE SET {update_col} = Excluded.{update_col}
+        """
+    ).format(
+        schema_name=sql.Identifier(etl_yaml["schema_name"]),
+        table=sql.Identifier(survey_params["table_name"]),
+        col_names=col_names,
+        values=values,
+        prim_key=sql.SQL(survey_params["prim_key"]),
+        update_col=sql.Identifier(survey_params["update_col"]),
+    )
 
 
 if __name__ == "__main__":
@@ -152,15 +197,11 @@ if __name__ == "__main__":
         survey_params = etl_yaml["surveys"][survey]
         query_agol_data(token=token, survey_params=survey_params, date_ran=date_ran)
 
-        proccessed_data_path = transform_agol_data(
-            survey_params=survey_params, date_ran=date_ran
-        )
+        proc_data = transform_agol_data(survey_params=survey_params, date_ran=date_ran)
 
-        load_agol_data(
-            user=user,
-            host=host,
-            password=password,
+        load_data_into_pg_warehouse(
+            data=proc_data,
             etl_yaml=etl_yaml,
             survey_params=survey_params,
-            proccessed_data_path=proccessed_data_path,
         )
+    logger.info("Succesfully ran AGOL ETL.\n")
