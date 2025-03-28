@@ -1,6 +1,7 @@
 import polars, os, logging, requests, json
 import psycopg2 as pg
 from psycopg2 import sql
+from numpy import ndarray
 from datetime import datetime
 from yaml import load, Loader
 from log.logfilter import SensitiveFormatter
@@ -112,7 +113,16 @@ def build_schema(survey_params: dict) -> dict:
     return schema
 
 
-def get_pg_connection(db_name: str):
+def get_pg_connection(db_name: str) -> pg.extensions.connection:
+    """
+    This tests a connection with a postgres database to ensure that
+    we're loading into a database that actually exists.
+
+    Args:
+        db_name: str, name of database to connect to.
+    Returns:
+        con: pg.extensions.connection, psycopg connection to pg database
+    """
     try:
         con = pg.connect(
             "dbname=%s user=%s host=%s password=%s" % (db_name, user, host, password)
@@ -125,14 +135,24 @@ def get_pg_connection(db_name: str):
         logging.error(Error)
 
 
-def check_table_exists(con, schema: str, table: str):
+def check_table_exists(con: pg.extensions.connection, schema_name: str, table: str):
+    """
+    This tests a to ensure the table we'll be writing to exists in
+    the postgres schema provided.
+
+    Args:
+        con: pg.extensions.connection, psycopg connection to pg
+            database
+        schema_name: str, name of postgres schema
+        table_name: str, name of table
+    """
     cur = con.cursor()
     command = sql.SQL(
         """
-        Select * from {schema}.{table} limit 1  
+        Select * from {schema_name}.{table} limit 1  
         """
     ).format(
-        schema=sql.Identifier(schema),
+        schema_name=sql.Identifier(schema_name),
         table=sql.Identifier(table),
     )
     try:
@@ -146,6 +166,15 @@ def check_table_exists(con, schema: str, table: str):
 def load_data_into_pg_warehouse(
     data: polars.DataFrame, etl_yaml: dict, survey_params: dict
 ):
+    """
+    This loads data into the KWB data warehouse, hosted in a postgres db.
+
+    Args:
+        data: polars.DataFrame, data to be loaded into warehouse
+        etl_yaml: dict, general variables for the etl process
+        survey_params: dict, variables for specific surveys, such as
+            rainfall or recharge surveys
+    """
     con = get_pg_connection(etl_yaml["db_name"])
     check_table_exists(con, etl_yaml["schema_name"], survey_params["table_name"])
     try:
@@ -156,8 +185,12 @@ def load_data_into_pg_warehouse(
         cur.close()
         con.close()
         logging.info(
-            "Data was successfully loaded to %s.%s"
-            % (etl_yaml["db_name"], survey_params["table_name"])
+            "Data was successfully loaded to %s.%s.%s"
+            % (
+                etl_yaml["db_name"],
+                etl_yaml["schema_name"],
+                survey_params["table_name"],
+            )
         )
     except pg.OperationalError as Error:
         con.close()
@@ -165,7 +198,20 @@ def load_data_into_pg_warehouse(
     return
 
 
-def build_load_query(data, etl_yaml: dict, survey_params: dict):
+def build_load_query(
+    data: ndarray, etl_yaml: dict, survey_params: dict
+) -> pg.sql.Composed:
+    """
+    This loads data into the KWB data warehouse, hosted in a postgres db.
+
+    Args:
+        data: numpy.ndarray, row of data to be loaded
+        etl_yaml: dict, general variables for the etl process
+        survey_params: dict, variables for specific surveys, such as
+            rainfall or recharge surveys
+    Returns:
+        pg.sql.Composed, Upsert query used to load data
+    """
     col_names = sql.SQL(", ").join(
         sql.Identifier(col) for col in survey_params["db_schema"].keys()
     )
