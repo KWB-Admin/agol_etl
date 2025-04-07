@@ -1,3 +1,3 @@
 .venv\Scripts\activate
-python -m agol_etl
+python -m agol_survey_etl
 deactivate

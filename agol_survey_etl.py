@@ -219,7 +219,7 @@ def build_load_query(
     return sql.SQL(
         """
         INSERT INTO {schema_name}.{table} ({col_names}) VALUES ({values})
-        ON CONFLICT ({prim_key}) DO UPDATE SET {update_col} = Excluded.{update_col}
+        ON CONFLICT ({prim_key}) DO UPDATE SET {update_col} = Excluded.{update_col}, edited_on = current_timestamp
         """
     ).format(
         schema_name=sql.Identifier(etl_yaml["schema_name"]),

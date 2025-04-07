@@ -3,3 +3,4 @@ log/
 processed_data/
 raw_data/
 yaml/
+__pycache__/
